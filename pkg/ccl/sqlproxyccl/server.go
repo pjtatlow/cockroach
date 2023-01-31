@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/pprof"
+	"regexp"
 	"time"
 
 	"github.com/cockroachdb/cockroach/pkg/util/contextutil"
@@ -24,6 +25,7 @@ import (
 	"github.com/cockroachdb/cockroach/pkg/util/stop"
 	"github.com/cockroachdb/errors"
 	"github.com/cockroachdb/logtags"
+	proxyproto "github.com/pires/go-proxyproto"
 )
 
 var (
@@ -85,6 +87,8 @@ func NewServer(ctx context.Context, stopper *stop.Stopper, options ProxyOptions)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	log.Infof(ctx, "Handling health check")
 	// TODO(chrisseto): Ideally, this health check should actually check the
 	// proxy's health in some fashion. How to actually check the health of a
 	// proxy remains to be seen.
@@ -187,6 +191,7 @@ func (s *Server) ServeHTTP(ctx context.Context, ln net.Listener) error {
 		)
 	}()
 
+	ln = &proxyproto.Listener{Listener: ln}
 	if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
@@ -198,6 +203,8 @@ func (s *Server) ServeHTTP(ctx context.Context, ln net.Listener) error {
 // Incoming client connections are taken through the Postgres handshake and
 // relayed to the configured backend server.
 func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
+	ln = &proxyproto.Listener{Listener: ln}
+
 	err := s.Stopper.RunAsyncTask(ctx, "listen-quiesce", func(ctx context.Context) {
 		<-s.Stopper.ShouldQuiesce()
 		if err := ln.Close(); err != nil && !grpcutil.IsClosedConnection(err) {
@@ -212,6 +219,18 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 		conn, err := ln.Accept()
 		if err != nil {
 			return err
+		}
+		if conn, ok := conn.(*proxyproto.Conn); ok {
+			header := conn.ProxyHeader()
+			if header == nil {
+				log.Info(ctx, "No proxy header")
+			} else {
+				tlvs, err := header.TLVs()
+
+				log.Infof(ctx, "Proxy header found: %v %v", tlvs, err)
+				log.Infof(ctx, "AWS Endpoint ID: %s", FindAWSVPCEndpointID(tlvs))
+
+			}
 		}
 
 		err = s.Stopper.RunAsyncTask(ctx, "proxy-con-serve", func(ctx context.Context) {
@@ -257,4 +276,37 @@ func (s *Server) AwaitNoConnections(ctx context.Context) <-chan struct{} {
 	})
 
 	return c
+}
+
+const (
+	// Amazon's extension
+	PP2_TYPE_AWS            = 0xEA
+	PP2_SUBTYPE_AWS_VPCE_ID = 0x01
+)
+
+var vpceRe = regexp.MustCompile("^[A-Za-z0-9-]*$")
+
+func IsAWSVPCEndpointID(tlv proxyproto.TLV) bool {
+	return tlv.Type == PP2_TYPE_AWS && len(tlv.Value) > 0 && tlv.Value[0] == PP2_SUBTYPE_AWS_VPCE_ID
+}
+
+func AWSVPCEndpointID(tlv proxyproto.TLV) (string, error) {
+	if !IsAWSVPCEndpointID(tlv) {
+		return "", proxyproto.ErrIncompatibleTLV
+	}
+	vpce := string(tlv.Value[1:])
+	if !vpceRe.MatchString(vpce) {
+		return "", proxyproto.ErrMalformedTLV
+	}
+	return vpce, nil
+}
+
+// FindAWSVPCEndpointID returns the first AWS VPC ID in the TLV if it exists and is well-formed.
+func FindAWSVPCEndpointID(tlvs []proxyproto.TLV) string {
+	for _, tlv := range tlvs {
+		if vpc, err := AWSVPCEndpointID(tlv); err == nil && vpc != "" {
+			return vpc
+		}
+	}
+	return ""
 }

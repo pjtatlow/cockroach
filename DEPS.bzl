@@ -6917,11 +6917,9 @@ def go_deps():
         name = "com_github_pires_go_proxyproto",
         build_file_proto_mode = "disable_global",
         importpath = "github.com/pires/go-proxyproto",
-        sha256 = "ad00aa7f321a1b560d2c6fb33f0bfaf2a0ce056a25c9a756cbd198b655fcbbf9",
-        strip_prefix = "github.com/pires/go-proxyproto@v0.0.0-20191211124218-517ecdf5bb2b",
-        urls = [
-            "https://storage.googleapis.com/cockroach-godeps/gomod/github.com/pires/go-proxyproto/com_github_pires_go_proxyproto-v0.0.0-20191211124218-517ecdf5bb2b.zip",
-        ],
+        # TODO: mirror this repo (to fix, run `./dev generate bazel --mirror`)
+        sum = "h1:KAZ7UteSOt6urjme6ZldyFm4wDe/z0ZUP0Yv0Dos0d8=",
+        version = "v0.6.2",
     )
     go_repository(
         name = "com_github_pkg_browser",
